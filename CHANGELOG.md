@@ -9,6 +9,20 @@ Versions follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0, `MINOR` bumps cover new modules; `PATCH` bumps cover bug fixes
 and polish.
 
+## [Unreleased]
+
+New module: unofficial WhatsApp channel through a self-hosted Chatwoot
+(fazer.ai fork) — pair numbers with a QR code from Settings → WhatsApp
+without opening the Chatwoot dashboard.
+
+> **Migration required:** apply `supabase/migrations/037_chatwoot_channel.sql`
+> (adds the per-account `chatwoot_connections` table with RLS — the
+> gateway binding, inbox fields and encrypted webhook secret).
+>
+> The gateway itself is configured with server env vars (see
+> `.env.local.example`): `CHATWOOT_BASE_URL`, `CHATWOOT_ACCOUNT_ID`,
+> `CHATWOOT_ACCESS_TOKEN` (+ optional `CHATWOOT_WEBHOOK_SECRET`).
+
 ## [0.8.1] — 2026-07-10
 
 Fixes inbound chats fragmenting into multiple threads for the same

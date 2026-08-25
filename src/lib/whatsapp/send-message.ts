@@ -5,10 +5,14 @@
 //
 // Given a conversation and message params, this:
 //   1. validates the params for the message type,
-//   2. loads the conversation + contact + WhatsApp config,
-//   3. sends to Meta (with phone-variant retry + contact auto-fix),
-//   4. persists the message + updates the conversation,
-//   5. pauses any active Flow run for the contact (agent stepped in).
+//   2. loads the conversation + contact,
+//   3. dispatches by channel: accounts with an active Chatwoot
+//      connection go through the gateway (@/lib/chatwoot/send);
+//      everyone else continues to Meta,
+//   4. sends (with phone-variant retry + contact auto-fix on Meta),
+//   5. persists the message + updates the conversation via the shared
+//      persistSentAgentMessage helper,
+//   6. pauses any active Flow run for the contact (agent stepped in).
 //
 // It is transport-agnostic: it takes a `SupabaseClient` and an
 // `accountId` and throws `SendMessageError` on failure. The callers
@@ -247,6 +251,27 @@ export async function sendMessageToConversation(
     );
   }
 
+  // Channel dispatch (migration 037): an account with an active
+  // Chatwoot connection routes ALL outbound traffic through the
+  // gateway instead of Meta — one active channel per account. The
+  // adapter reuses the shared persistence helper below. Imported
+  // dynamically because chatwoot/send imports this module back.
+  const chatwootAdapter = await import('@/lib/chatwoot/send');
+  const gatewayConnection = await chatwootAdapter.getActiveChatwootConnection(
+    db,
+    accountId
+  );
+  if (gatewayConnection) {
+    return chatwootAdapter.sendMessageViaChatwoot(
+      db,
+      accountId,
+      conversation,
+      contact,
+      params,
+      gatewayConnection
+    );
+  }
+
   // WhatsApp config, account-scoped.
   const { data: config, error: configError } = await db
     .from('whatsapp_config')
@@ -440,19 +465,17 @@ export async function sendMessageToConversation(
       .eq('id', contact.id);
   }
 
-  // Persist the sent message. Field names MUST match the messages
-  // schema (see 001_initial_schema.sql).
-  // Interactive messages persist the body as content_text (so the
-  // conversation-list preview reads sensibly) plus the full structured
-  // payload so the thread can re-render the buttons / rows.
+  // Persist the sent message + update the conversation + pause any
+  // active Flow run. Shared with the Chatwoot channel adapter so both
+  // transports record identical rows.
   const interactiveBody =
     messageType === 'interactive' ? interactivePayload!.body : null;
 
-  const { data: messageRecord, error: msgError } = await db
-    .from('messages')
-    .insert({
-      conversation_id: conversationId,
-      sender_type: 'agent',
+  const { messageId: messageRecordId } = await persistSentAgentMessage(db, {
+    accountId,
+    contactId: contact.id,
+    conversationId,
+    insertRow: {
       content_type: messageType,
       content_text: interactiveBody ?? contentText ?? null,
       media_url: mediaUrl || null,
@@ -460,8 +483,59 @@ export async function sendMessageToConversation(
       interactive_payload:
         messageType === 'interactive' ? interactivePayload : null,
       message_id: waMessageId,
-      status: 'sent',
       reply_to_message_id: replyToMessageId || null,
+      channel: 'meta',
+    },
+    lastMessageText:
+      messageType === 'interactive'
+        ? interactivePayloadPreviewText(interactivePayload!)
+        : contentText || `[${messageType}]`,
+  });
+
+  return { messageId: messageRecordId, whatsappMessageId: waMessageId };
+}
+
+// ------------------------------------------------------------
+// Shared outbound persistence.
+//
+// Both transports (Meta Cloud API and the Chatwoot gateway) land in
+// this one helper so the messages row shape, conversation preview
+// update, and the "agent replied → pause flow runs" handoff can never
+// drift apart. Exported for `@/lib/chatwoot/send`.
+// ------------------------------------------------------------
+
+export interface PersistSentAgentMessageOptions {
+  accountId: string;
+  /** Contact id — used only to scope the flow-run pause. */
+  contactId: string;
+  conversationId: string;
+  insertRow: {
+    content_type: string;
+    content_text: string | null;
+    media_url: string | null;
+    template_name: string | null;
+    interactive_payload: unknown;
+    message_id: string;
+    reply_to_message_id: string | null;
+    channel?: 'meta' | 'chatwoot';
+  };
+  lastMessageText: string;
+}
+
+export async function persistSentAgentMessage(
+  db: SupabaseClient,
+  opts: PersistSentAgentMessageOptions
+): Promise<{ messageId: string }> {
+  const { accountId, contactId, conversationId, insertRow, lastMessageText } =
+    opts;
+
+  const { data: messageRecord, error: msgError } = await db
+    .from('messages')
+    .insert({
+      conversation_id: conversationId,
+      sender_type: 'agent',
+      status: 'sent',
+      ...insertRow,
     })
     .select()
     .single();
@@ -470,15 +544,10 @@ export async function sendMessageToConversation(
     console.error('[send-message] error inserting sent message:', msgError);
     throw new SendMessageError(
       'db_error',
-      `Message sent to Meta but failed to save to DB: ${msgError.message}`,
+      `Message sent but failed to save to DB: ${msgError.message}`,
       500
     );
   }
-
-  const lastMessageText =
-    messageType === 'interactive'
-      ? interactivePayloadPreviewText(interactivePayload!)
-      : contentText || `[${messageType}]`;
 
   await db
     .from('conversations')
@@ -500,7 +569,7 @@ export async function sendMessageToConversation(
         end_reason: 'agent_replied',
       })
       .eq('account_id', accountId)
-      .eq('contact_id', contact.id)
+      .eq('contact_id', contactId)
       .eq('status', 'active');
     if (pauseErr) {
       console.error('[flows] pause-on-agent-send failed:', pauseErr.message);
@@ -512,5 +581,5 @@ export async function sendMessageToConversation(
     );
   }
 
-  return { messageId: messageRecord.id, whatsappMessageId: waMessageId };
+  return { messageId: messageRecord.id };
 }
