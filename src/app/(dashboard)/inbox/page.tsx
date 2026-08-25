@@ -206,7 +206,17 @@ function InboxPageInner() {
         .eq("account_id", accountId)
         .maybeSingle();
 
-      setWhatsappConnected(data?.status === "connected");
+      // The unofficial channel counts too: an active Chatwoot gateway
+      // means WhatsApp traffic flows, banner or not.
+      const { data: chatwoot } = await supabase
+        .from("chatwoot_connections")
+        .select("status")
+        .eq("account_id", accountId)
+        .maybeSingle();
+
+      setWhatsappConnected(
+        data?.status === "connected" || chatwoot?.status === "connected",
+      );
     };
 
     checkConnection();
