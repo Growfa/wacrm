@@ -167,6 +167,11 @@ export const RATE_LIMITS = {
    *  capping a stampede; excess inbounds simply don't get an auto-reply
    *  (they still land in the inbox for a human). */
   aiAutoReplyAccount: { limit: 30, windowMs: 60_000 },
+  /** Chatwoot QR-pairing status poll (settings wizard). The UI polls
+   *  every ~3s while a pairing screen is open ≈ 20/min per admin; 90/min
+   *  leaves headroom for a couple of admins watching at once without
+   *  letting an abandoned tab hammer the Chatwoot instance forever. */
+  chatwootPairStatus: { limit: 90, windowMs: 60_000 },
 } as const;
 
 /** Test-only helper. Clears the in-memory state so unit tests don't

@@ -162,6 +162,13 @@ export interface Conversation {
   user_id: string;
   contact_id: string;
   status: ConversationStatus;
+  /**
+   * Chatwoot-side conversation display_id when this thread is linked
+   * to the unofficial WhatsApp gateway (migration 037). Null for
+   * Meta-channel threads and for gateway threads that were never
+   * opened by an inbound message (nothing to reply to yet).
+   */
+  chatwoot_conversation_id?: number | null;
   assigned_agent_id?: string;
   last_message_text?: string;
   last_message_at?: string;
@@ -232,6 +239,13 @@ export interface Message {
   created_at: string;
   reply_to_message_id?: string;
   /**
+   * Transport provenance (migration 037): which channel carried this
+   * message. 'meta' = official WhatsApp Cloud API (default, matches
+   * every pre-existing row); 'chatwoot' = unofficial WhatsApp via the
+   * Chatwoot gateway.
+   */
+  channel?: 'meta' | 'chatwoot';
+  /**
    * Only set when `content_type === 'interactive'` — the stable id of
    * the button or list row the customer tapped. The Flows engine uses
    * this to route the next node; the inbox bubble uses it as a styling
@@ -274,8 +288,7 @@ export interface WhatsAppConfig {
   access_token: string;
   verify_token?: string;
   status: 'connected' | 'disconnected';
-  connected_at?: string;
-  /**
+  connected_at?: string;  /**
    * Set when POST /{phone_number_id}/register last succeeded. NULL
    * means the number was saved but never actually subscribed for
    * webhooks on Meta's side — inbound events will be silently lost.
@@ -285,6 +298,30 @@ export interface WhatsAppConfig {
   subscribed_apps_at?: string;
   /** Last error from /register; cleared on success. */
   last_registration_error?: string;
+}
+
+// ============================================================
+// Unofficial WhatsApp via Chatwoot gateway (migration 037)
+// ============================================================
+
+export interface ChatwootConnection {
+  id: string;
+  account_id: string;
+  created_by?: string;
+  /** Chatwoot base URL, no trailing slash (e.g. https://chatwoot.example.com). */
+  base_url: string;
+  chatwoot_account_id: number;
+  /** AES-256-GCM encrypted at rest — never returned to the client. */
+  api_access_token: string;
+  /** AES-256-GCM encrypted HMAC secret for inbound webhook verification. */
+  webhook_secret: string;
+  inbox_id?: number | null;
+  inbox_name?: string | null;
+  inbox_phone?: string | null;
+  status: 'connected' | 'disconnected';
+  last_verified_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // Raw Meta status enum. We persist this verbatim from Meta (sync + webhook)
