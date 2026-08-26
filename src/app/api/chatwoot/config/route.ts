@@ -41,6 +41,7 @@ import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 import {
   verifyCredentials,
   registerAccountWebhook,
+  listAccountWebhooks,
   deleteWebhooksByUrl,
   ChatwootApiError,
   normalizeBaseUrl,
@@ -232,12 +233,35 @@ export async function POST(request: Request) {
       const registered = await registerAccountWebhook(endpoint, webhookUrl, webhookSecret)
       webhookRegistered = true
 
-      // Some forks (e.g. fazer.ai) ignore the secret we send and
-      // generate their own at creation time. If the returned secret
-      // differs from what we just encrypted and stored, re-encrypt
-      // and update the row so the webhook route can verify signatures.
-      if (registered.secret && registered.secret !== webhookSecret) {
-        const actualEncrypted = encrypt(registered.secret)
+      // The fazer.ai fork (and possibly other versions) ignores the
+      // secret we send at creation time and generates its own. The
+      // POST response often omits the secret entirely, so we must
+      // fetch the webhook list to discover what was actually assigned.
+      let actualSecret = registered.secret
+      if (!actualSecret) {
+        try {
+          const hooks = await listAccountWebhooks(endpoint)
+          let targetPath: string | null = null
+          try { targetPath = new URL(webhookUrl).pathname.replace(/\/+$/, '') } catch { /* noop */ }
+          const match = hooks.find((h) => {
+            if (h.id !== registered.id) return false
+            if (targetPath) {
+              try { return new URL(h.url).pathname.replace(/\/+$/, '') === targetPath } catch { /* noop */ }
+            }
+            return true
+          })
+          if (match?.secret) actualSecret = match.secret
+        } catch {
+          // Non-fatal: without the real secret we keep the generated
+          // one and HMAC will fail until the user pins one via env.
+        }
+      }
+
+      // If the actual secret differs from what we just encrypted and
+      // stored, re-encrypt and update the row so the webhook route
+      // can verify incoming Chatwoot signatures.
+      if (actualSecret && actualSecret !== webhookSecret) {
+        const actualEncrypted = encrypt(actualSecret)
         await supabase
           .from('chatwoot_connections')
           .update({ webhook_secret: actualEncrypted, updated_at: new Date().toISOString() })

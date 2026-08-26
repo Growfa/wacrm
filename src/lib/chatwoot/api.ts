@@ -331,7 +331,11 @@ function parseWebhookList(body: unknown): ChatwootWebhookRecord[] {
   }
   if (!Array.isArray(rows)) return [];
   return (rows as Array<Record<string, unknown>>)
-    .map((row) => ({ id: Number(row?.id ?? 0), url: String(row?.url ?? '') }))
+    .map((row) => ({
+      id: Number(row?.id ?? 0),
+      url: String(row?.url ?? ''),
+      secret: typeof row?.secret === 'string' ? row.secret : undefined,
+    }))
     .filter((row) => row.id > 0 && row.url !== '');
 }
 

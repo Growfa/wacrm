@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   getCurrentAccount: vi.fn(),
   verifyCredentials: vi.fn(),
   registerAccountWebhook: vi.fn(),
+  listAccountWebhooks: vi.fn(),
   deleteWebhooksByUrl: vi.fn(),
 }))
 
@@ -36,6 +37,7 @@ vi.mock('@/lib/auth/account', () => ({
 vi.mock('@/lib/chatwoot/api', () => ({
   verifyCredentials: mocks.verifyCredentials,
   registerAccountWebhook: mocks.registerAccountWebhook,
+  listAccountWebhooks: mocks.listAccountWebhooks,
   deleteWebhooksByUrl: mocks.deleteWebhooksByUrl,
   ChatwootApiError: class ChatwootApiError extends Error {},
   // Mirrors the real helper: accepts only well-formed https URLs.
@@ -128,6 +130,11 @@ beforeEach(() => {
   })
   mocks.verifyCredentials.mockResolvedValue({ name: 'Admin' })
   mocks.registerAccountWebhook.mockResolvedValue({ id: 5, url: 'x' })
+  // Default: list returns the same secret we sent (no fork override).
+  mocks.listAccountWebhooks.mockImplementation(async () => {
+    const secret = mocks.registerAccountWebhook.mock.calls[0]?.[2]
+    return secret ? [{ id: 5, url: 'x', secret }] : []
+  })
 })
 
 afterEach(() => {
@@ -184,11 +191,14 @@ describe('/api/chatwoot/config POST', () => {
 
   it('re-encrypts the webhook secret when the fork returns its own', async () => {
     // The fazer.ai fork ignores the secret we send and generates its own.
+    // The POST response omits the secret — we discover it via listAccountWebhooks.
     mocks.registerAccountWebhook.mockResolvedValueOnce({
       id: 5,
       url: 'x',
-      secret: 'fork-generated-secret-abc',
     })
+    mocks.listAccountWebhooks.mockResolvedValueOnce([
+      { id: 5, url: 'x', secret: 'fork-generated-secret-abc' },
+    ])
 
     const res = await postRequest()
     expect(res.status).toBe(200)
@@ -208,8 +218,10 @@ describe('/api/chatwoot/config POST', () => {
     mocks.registerAccountWebhook.mockResolvedValueOnce({
       id: 5,
       url: 'x',
-      secret: 'same-secret',
     })
+    mocks.listAccountWebhooks.mockResolvedValueOnce([
+      { id: 5, url: 'x', secret: 'same-secret' },
+    ])
 
     const res = await postRequest()
     expect(res.status).toBe(200)
