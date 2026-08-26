@@ -74,12 +74,17 @@ function makeSupabaseMock(result: {
   error?: unknown
 } = { data: { id: 'cw-1' }, error: null }) {
   const upserts: Array<Record<string, unknown>> = []
+  const updates: Array<Record<string, unknown>> = []
   const b: Record<string, unknown> = {}
   const chain = () => b
   b.select = vi.fn(chain)
   b.eq = vi.fn(chain)
   b.upsert = vi.fn((payload: Record<string, unknown>) => {
     upserts.push(payload)
+    return b
+  })
+  b.update = vi.fn((payload: Record<string, unknown>) => {
+    updates.push(payload)
     return b
   })
   b.single = vi.fn(() =>
@@ -94,7 +99,7 @@ function makeSupabaseMock(result: {
       error: result.error ?? null,
     })
   )
-  return { from: vi.fn(() => b), upserts }
+  return { from: vi.fn(() => b), upserts, updates }
 }
 
 let db: ReturnType<typeof makeSupabaseMock>
@@ -175,6 +180,40 @@ describe('/api/chatwoot/config POST', () => {
       'pinned-secret'
     )
     expect(db.upserts[0].webhook_secret).toBe('enc:pinned-secret')
+  })
+
+  it('re-encrypts the webhook secret when the fork returns its own', async () => {
+    // The fazer.ai fork ignores the secret we send and generates its own.
+    mocks.registerAccountWebhook.mockResolvedValueOnce({
+      id: 5,
+      url: 'x',
+      secret: 'fork-generated-secret-abc',
+    })
+
+    const res = await postRequest()
+    expect(res.status).toBe(200)
+
+    // Initial upsert used the locally generated hex secret.
+    const initialSecret = db.upserts[0].webhook_secret
+    expect(initialSecret).toMatch(/^enc:[0-9a-f]{48}$/)
+
+    // A subsequent UPDATE must have replaced it with the fork's secret.
+    expect(db.updates.length).toBe(1)
+    expect(db.updates[0].webhook_secret).toBe('enc:fork-generated-secret-abc')
+  })
+
+  it('skips the re-encrypt UPDATE when the fork returns the same secret', async () => {
+    // Pin a known secret so we can compare.
+    setEnv({ CHATWOOT_WEBHOOK_SECRET: 'same-secret' })
+    mocks.registerAccountWebhook.mockResolvedValueOnce({
+      id: 5,
+      url: 'x',
+      secret: 'same-secret',
+    })
+
+    const res = await postRequest()
+    expect(res.status).toBe(200)
+    expect(db.updates.length).toBe(0)
   })
 
   it('surfaces the raw DB message when the upsert fails', async () => {

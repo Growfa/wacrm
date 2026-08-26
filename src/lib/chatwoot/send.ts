@@ -65,11 +65,21 @@ export async function getActiveChatwootConnection(
   }
   if (!data) return null;
 
+  let accessToken: string;
+  try {
+    accessToken = decrypt(data.api_access_token);
+  } catch {
+    console.error(
+      '[chatwoot] api_access_token decryption failed — check ENCRYPTION_KEY'
+    );
+    return null;
+  }
+
   return {
     id: data.id,
     baseUrl: data.base_url,
     chatwootAccountId: data.chatwoot_account_id,
-    accessToken: decrypt(data.api_access_token),
+    accessToken,
     inboxId: data.inbox_id ?? null,
     inboxPhone: data.inbox_phone ?? null,
     status: data.status,

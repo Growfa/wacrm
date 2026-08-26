@@ -229,8 +229,20 @@ export async function POST(request: Request) {
     let webhookError: string | null = null
     try {
       await deleteWebhooksByUrl(endpoint, webhookUrl)
-      await registerAccountWebhook(endpoint, webhookUrl, webhookSecret)
+      const registered = await registerAccountWebhook(endpoint, webhookUrl, webhookSecret)
       webhookRegistered = true
+
+      // Some forks (e.g. fazer.ai) ignore the secret we send and
+      // generate their own at creation time. If the returned secret
+      // differs from what we just encrypted and stored, re-encrypt
+      // and update the row so the webhook route can verify signatures.
+      if (registered.secret && registered.secret !== webhookSecret) {
+        const actualEncrypted = encrypt(registered.secret)
+        await supabase
+          .from('chatwoot_connections')
+          .update({ webhook_secret: actualEncrypted, updated_at: new Date().toISOString() })
+          .eq('id', saved.id)
+      }
     } catch (err) {
       webhookError =
         err instanceof Error ? err.message : 'Unknown Chatwoot API error'

@@ -269,6 +269,11 @@ export async function fetchAttachmentBytes(
 export interface ChatwootWebhookRecord {
   id: number;
   url: string;
+  /** The actual secret the Chatwoot instance uses for HMAC signing.
+   *  Some forks (e.g. fazer.ai) ignore the secret we send at creation
+   *  time and generate their own — we must store whatever they return
+   *  so the webhook route can verify incoming signatures. */
+  secret?: string;
 }
 
 /** Subscriptions the inbound pipeline actually consumes. */
@@ -310,6 +315,7 @@ export async function registerAccountWebhook(
   return {
     id: Number(record.id ?? 0),
     url: String(record.url ?? webhookUrl),
+    secret: typeof record.secret === 'string' ? record.secret : undefined,
   };
 }
 
