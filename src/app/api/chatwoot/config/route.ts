@@ -228,44 +228,79 @@ export async function POST(request: Request) {
     const webhookUrl = `${resolveWebhookBase(request)}/api/chatwoot/webhook/${saved.id}`
     let webhookRegistered = false
     let webhookError: string | null = null
+    let secretMismatchWarning: string | null = null
     try {
       await deleteWebhooksByUrl(endpoint, webhookUrl)
       const registered = await registerAccountWebhook(endpoint, webhookUrl, webhookSecret)
       webhookRegistered = true
 
       // The fazer.ai fork (and possibly other versions) ignores the
-      // secret we send at creation time and generates its own. The
-      // POST response often omits the secret entirely, so we must
-      // fetch the webhook list to discover what was actually assigned.
+      // secret we send at creation time and generates its own, signing
+      // deliveries with THAT secret. The list endpoint is the source of
+      // truth for what the fork actually uses — so we re-read it after
+      // creation and treat the fork-reported secret as authoritative.
+      // (The `registered.secret` from the POST response is a first
+      // guess, but the list reflects the real persisted value.)
       let actualSecret = registered.secret
-      if (!actualSecret) {
-        try {
-          const hooks = await listAccountWebhooks(endpoint)
-          let targetPath: string | null = null
-          try { targetPath = new URL(webhookUrl).pathname.replace(/\/+$/, '') } catch { /* noop */ }
-          const match = hooks.find((h) => {
-            if (h.id !== registered.id) return false
-            if (targetPath) {
-              try { return new URL(h.url).pathname.replace(/\/+$/, '') === targetPath } catch { /* noop */ }
-            }
-            return true
-          })
-          if (match?.secret) actualSecret = match.secret
-        } catch {
-          // Non-fatal: without the real secret we keep the generated
-          // one and HMAC will fail until the user pins one via env.
+      try {
+        const hooks = await listAccountWebhooks(endpoint)
+        let targetPath: string | null = null
+        try { targetPath = new URL(webhookUrl).pathname.replace(/\/+$/, '') } catch { /* noop */ }
+
+        // Match by webhook ID first, then fall back to matching by URL
+        // path alone (in case the POST returned an unexpected id).
+        const byId = hooks.find((h) => h.id === registered.id)
+        const match = byId ?? hooks.find((h) => {
+          if (!targetPath) return false
+          try { return new URL(h.url).pathname.replace(/\/+$/, '') === targetPath } catch { /* noop */ }
+          return false
+        })
+
+        if (match?.secret) {
+          actualSecret = match.secret
+          console.log('[chatwoot/config POST] resolved webhook secret from list endpoint')
+        } else if (match && !match.secret) {
+          // The webhook exists but the fork returned no secret at all.
+          console.warn(
+            '[chatwoot/config POST] webhook found but has NO secret —',
+            'HMAC verification will fail. Set CHATWOOT_WEBHOOK_SECRET env var',
+            'to a fixed value and configure the same value in Chatwoot.'
+          )
+          secretMismatchWarning =
+            'The Chatwoot instance did not return a webhook secret. ' +
+            'HMAC signature verification may fail. Set CHATWOOT_WEBHOOK_SECRET ' +
+            'to a fixed value in your .env and re-save.'
+        } else if (!byId) {
+          console.warn(
+            '[chatwoot/config POST] could not find registered webhook in list —',
+            `registered id=${registered.id}, list returned ${hooks.length} hooks`
+          )
         }
+      } catch (listErr) {
+        console.warn(
+          '[chatwoot/config POST] failed to fetch webhook list for secret recovery:',
+          listErr instanceof Error ? listErr.message : listErr
+        )
       }
 
       // If the actual secret differs from what we just encrypted and
       // stored, re-encrypt and update the row so the webhook route
       // can verify incoming Chatwoot signatures.
       if (actualSecret && actualSecret !== webhookSecret) {
+        console.log('[chatwoot/config POST] secret mismatch — updating stored secret to match Chatwoot')
         const actualEncrypted = encrypt(actualSecret)
         await supabase
           .from('chatwoot_connections')
           .update({ webhook_secret: actualEncrypted, updated_at: new Date().toISOString() })
           .eq('id', saved.id)
+      } else if (!actualSecret && !secretMismatchWarning) {
+        // No secret from the POST response AND no secret from the list.
+        // The only option is the secret we generated — it will only work
+        // if the fork actually honours the secret sent at creation time.
+        console.warn(
+          '[chatwoot/config POST] no secret recovered — HMAC verification',
+          'depends on whether the fork honours the registration-time secret.'
+        )
       }
     } catch (err) {
       webhookError =
@@ -282,6 +317,7 @@ export async function POST(request: Request) {
       webhook_url: webhookUrl,
       webhook_registered: webhookRegistered,
       webhook_error: webhookError,
+      secret_mismatch_warning: secretMismatchWarning,
     })
   } catch (err) {
     if (err instanceof ChatwootApiError) {

@@ -310,8 +310,14 @@ export async function registerAccountWebhook(
   });
   if (!response.ok) throw await parseError(response);
   const body = (await response.json()) as Record<string, unknown>;
+  // The fork wraps the created webhook under `payload.webhook`
+  // (e.g. fazer.ai), while upstream Chatwoot may return it directly
+  // under `webhook` or at the top level. Unwrap all three variants.
+  const payload = body.payload as Record<string, unknown> | undefined;
   const record =
-    (body.webhook as Record<string, unknown> | undefined) ?? body;
+    (payload?.webhook as Record<string, unknown> | undefined) ??
+    (body.webhook as Record<string, unknown> | undefined) ??
+    body;
   return {
     id: Number(record.id ?? 0),
     url: String(record.url ?? webhookUrl),

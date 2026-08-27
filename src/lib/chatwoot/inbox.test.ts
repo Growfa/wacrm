@@ -35,6 +35,7 @@ import {
   deleteWebhooksByUrl,
   disconnectInboxProvider,
   getInboxProviderState,
+  registerAccountWebhook,
   setupInboxProvider,
   ChatwootApiError,
 } from './api'
@@ -224,5 +225,53 @@ describe('deleteWebhooksByUrl', () => {
     )
     await deleteWebhooksByUrl(ENDPOINT, 'https://x.test/api/chatwoot/webhook/q')
     expect(fetchMock).toHaveBeenCalledOnce() // only the GET
+  })
+})
+
+describe('registerAccountWebhook', () => {
+  it('reads id and secret from the fazer.ai { payload: { webhook } } envelope', async () => {
+    // The fork wraps the created webhook under payload.webhook and
+    // assigns its OWN secret (ignoring the one we sent).
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        payload: {
+          webhook: {
+            id: 28,
+            url: 'https://crm.example.com/api/chatwoot/webhook/abc',
+            secret: 'P8KMc8MKyiXkTpyCCX2LjJjA',
+          },
+        },
+      })
+    )
+
+    const record = await registerAccountWebhook(
+      ENDPOINT,
+      'https://crm.example.com/api/chatwoot/webhook/abc',
+      'a'.repeat(48)
+    )
+
+    expect(record).toEqual({
+      id: 28,
+      url: 'https://crm.example.com/api/chatwoot/webhook/abc',
+      secret: 'P8KMc8MKyiXkTpyCCX2LjJjA',
+    })
+  })
+
+  it('reads the webhook from a flat { webhook } response (upstream)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        webhook: { id: 7, url: 'https://x.test/api/chatwoot/webhook/z', secret: 'flat-secret' },
+      })
+    )
+    const record = await registerAccountWebhook(
+      ENDPOINT,
+      'https://x.test/api/chatwoot/webhook/z',
+      'secret'
+    )
+    expect(record).toEqual({
+      id: 7,
+      url: 'https://x.test/api/chatwoot/webhook/z',
+      secret: 'flat-secret',
+    })
   })
 })

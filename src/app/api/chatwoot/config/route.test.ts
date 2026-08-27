@@ -191,10 +191,12 @@ describe('/api/chatwoot/config POST', () => {
 
   it('re-encrypts the webhook secret when the fork returns its own', async () => {
     // The fazer.ai fork ignores the secret we send and generates its own.
-    // The POST response omits the secret — we discover it via listAccountWebhooks.
+    // The POST response returns the fork secret via the payload.webhook
+    // envelope — we must store THAT, not our generated 48-hex secret.
     mocks.registerAccountWebhook.mockResolvedValueOnce({
       id: 5,
       url: 'x',
+      secret: 'fork-generated-secret-abc',
     })
     mocks.listAccountWebhooks.mockResolvedValueOnce([
       { id: 5, url: 'x', secret: 'fork-generated-secret-abc' },

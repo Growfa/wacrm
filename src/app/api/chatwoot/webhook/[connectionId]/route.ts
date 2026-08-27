@@ -45,6 +45,8 @@ import {
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 
+const LOG = '[chatwoot-webhook]'
+
 export const maxDuration = 60
 
 // Lazy-initialized to avoid build-time crash when env vars are missing
@@ -75,12 +77,18 @@ export async function POST(
   const timestampHeader = request.headers.get('x-chatwoot-timestamp')
   const signatureHeader = request.headers.get('x-chatwoot-signature')
 
+  console.log(`${LOG} incoming delivery for connectionId=${connectionId} body_len=${rawBody.length} has_timestamp=${!!timestampHeader} has_signature=${!!signatureHeader}`)
+
   let payload: ChatwootWebhookPayload
   try {
     payload = JSON.parse(rawBody)
   } catch {
+    console.warn(`${LOG} invalid JSON body`)
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
+
+  // Log event type early so we can trace what Chatwoot is sending.
+  console.log(`${LOG} event=${payload.event ?? '(none)'} id=${payload.id ?? '(none)'} inbox_id=${payload.inbox?.id ?? payload.conversation?.inbox_id ?? '(none)'}`)
 
   // Resolve the connection named by the path. A removed/disconnected
   // row stops accepting deliveries immediately (404), which also makes
@@ -93,23 +101,28 @@ export async function POST(
     .maybeSingle()
 
   if (!connection) {
-    console.warn('[chatwoot-webhook] unknown or disconnected connection:', connectionId)
+    console.warn(`${LOG} unknown or disconnected connection: ${connectionId}`)
     return NextResponse.json({ error: 'Unknown connection' }, { status: 404 })
   }
+
+  console.log(`${LOG} connection found: inbox_id=${connection.inbox_id} account_id=${connection.account_id} has_secret=${!!connection.webhook_secret}`)
 
   // Fail closed (401), loudly, so a broken secret shows up in
   // Chatwoot's delivery dashboard instead of silently eating events.
   let secret: string
   try {
     secret = decrypt(connection.webhook_secret)
-  } catch {
-    console.error('[chatwoot-webhook] webhook_secret decryption failed:', connectionId)
+  } catch (err) {
+    console.error(`${LOG} webhook_secret decryption FAILED for connection ${connectionId}:`, err instanceof Error ? err.message : err)
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
   }
   if (!verifyChatwootSignature(rawBody, timestampHeader, signatureHeader, secret)) {
-    console.warn('[chatwoot-webhook] rejected request with invalid signature')
+    console.warn(`${LOG} HMAC verification FAILED — stored secret length=${secret.length} timestamp=${timestampHeader} signature=${signatureHeader?.slice(0, 30)}…`)
+    console.warn(`${LOG} HINT: Chatwoot may be using a different secret than what is stored. Run GET /api/chatwoot/debug to compare.`)
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
   }
+
+  console.log(`${LOG} HMAC verification PASSED — processing event`)
 
   // Ack fast; process inside after() exactly like the Meta webhook
   // (a slow ack triggers Chatwoot retries + duplicate inserts, while a
@@ -130,11 +143,12 @@ export async function POST(
         conn.inbox_id &&
         Number(conn.inbox_id) !== eventInboxId
       ) {
+        console.log(`${LOG} inbox ownership gate: event inbox_id=${eventInboxId} ≠ bound inbox_id=${conn.inbox_id} — DROPPED`)
         return
       }
       await processEvent(payload, conn)
     } catch (error) {
-      console.error('[chatwoot-webhook] processing failed:', error)
+      console.error(`${LOG} processing failed:`, error)
     }
   })
 
@@ -147,12 +161,15 @@ async function processEvent(
 ) {
   switch (payload.event) {
     case 'message_created':
+      console.log(`${LOG} processing message_created event`)
       await handleIncomingMessage(payload, connection)
       break
     case 'message_updated':
+      console.log(`${LOG} processing message_updated event`)
       await handleStatusUpdate(payload)
       break
     default:
+      console.log(`${LOG} ignoring event type: ${payload.event}`)
       // contact_*, conversation_*, typing… — nothing to persist yet.
       break
   }
@@ -165,7 +182,12 @@ async function processEvent(
  */
 async function handleStatusUpdate(payload: ChatwootWebhookPayload) {
   const update = normalizeStatusUpdate(payload)
-  if (!update) return
+  if (!update) {
+    console.log(`${LOG} normalizeStatusUpdate returned null for event message_updated`)
+    return
+  }
+
+  console.log(`${LOG} status update: msgId=${update.messageId} new_status=${update.status}`)
 
   const { error } = await supabaseAdmin()
     .from('messages')
@@ -174,7 +196,7 @@ async function handleStatusUpdate(payload: ChatwootWebhookPayload) {
     .eq('channel', 'chatwoot')
 
   if (error) {
-    console.error('[chatwoot-webhook] status update failed:', error.message)
+    console.error(`${LOG} status UPDATE failed:`, error.message)
   }
 }
 
@@ -184,16 +206,25 @@ async function handleIncomingMessage(
 ) {
   const normalized = normalizeIncomingMessage(payload)
   // Outgoing echo of our own send / template notice / no phone → skip.
-  if (!normalized) return
+  if (!normalized) {
+    // Log why normalization failed so operators can debug fork-specific
+    // payload shapes that don't match our expected schema.
+    const messageTypeRaw = payload.message_type as string | number | undefined
+    const isOutgoing = messageTypeRaw === 'outgoing' || messageTypeRaw === 'template' || messageTypeRaw === 1
+    const hasPhone = !!(payload.sender?.phone_number || payload.conversation?.meta?.sender?.phone_number)
+    const hasDisplayId = !!(payload.conversation?.display_id || payload.conversation?.id)
+    const hasId = !!payload.id
+    console.log(`${LOG} normalizeIncomingMessage returned null — message_type=${messageTypeRaw} is_outgoing=${isOutgoing} has_phone=${hasPhone} has_display_id=${hasDisplayId} has_id=${hasId} event_id=${payload.id}`)
+    return
+  }
+
+  console.log(`${LOG} normalized: msgId=${normalized.messageId} phone=${normalized.senderPhone} displayId=${normalized.conversationDisplayId} contentType=${normalized.contentType} inboxId=${normalized.inboxId}`)
 
   const accountId = connection.account_id
   // Audit FK owner for new rows — the admin who connected the inbox.
   const ownerUserId = connection.created_by
   if (!ownerUserId) {
-    console.error(
-      '[chatwoot-webhook] connection has no created_by; cannot attribute inserts',
-      connection.id
-    )
+    console.error(`${LOG} connection has no created_by; cannot attribute inserts`, connection.id)
     return
   }
 
@@ -206,8 +237,12 @@ async function handleIncomingMessage(
     normalized.senderPhone,
     normalized.senderName
   )
-  if (!contactOutcome) return
+  if (!contactOutcome) {
+    console.error(`${LOG} findOrCreateContact returned null for phone=${normalized.senderPhone}`)
+    return
+  }
   const contactRecord = contactOutcome.contact
+  console.log(`${LOG} contact: id=${contactRecord.id} was_created=${contactOutcome.wasCreated} phone=${normalized.senderPhone}`)
 
   const convResult = await findOrCreateConversation(
     supabaseAdmin(),
@@ -215,8 +250,12 @@ async function handleIncomingMessage(
     ownerUserId,
     contactRecord.id
   )
-  if (!convResult) return
+  if (!convResult) {
+    console.error(`${LOG} findOrCreateConversation returned null for contact_id=${contactRecord.id}`)
+    return
+  }
   const conversation = convResult.conversation
+  console.log(`${LOG} conversation: id=${conversation.id} was_created=${convResult.created} existing_woot_id=${conversation.chatwoot_conversation_id} new_woot_id=${normalized.conversationDisplayId}`)
 
   // Link the thread to its Chatwoot display_id (the outbound adapter
   // posts replies straight to it). Backfills legacy threads too.
@@ -260,9 +299,11 @@ async function handleIncomingMessage(
     })
 
   if (msgError) {
-    console.error('[chatwoot-webhook] error inserting message:', msgError)
+    console.error(`${LOG} message INSERT FAILED:`, JSON.stringify(msgError))
     return
   }
+
+  console.log(`${LOG} message INSERTED successfully: id=${normalized.messageId} conv_id=${conversation.id}`)
 
   // Preview + unread badge, mirroring the Meta pipeline.
   const { error: convError } = await supabaseAdmin()
