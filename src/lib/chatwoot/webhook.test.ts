@@ -87,17 +87,38 @@ describe('normalizeIncomingMessage', () => {
     )
   })
 
-  it('returns null for outgoing echoes of our own sends', () => {
-    expect(
-      normalizeIncomingMessage(messageCreated({ message_type: 'outgoing' }))
-    ).toBeNull()
+  it('normalizes an outgoing agent message as sender_type=agent', () => {
+    const normalized = normalizeIncomingMessage(
+      messageCreated({
+        message_type: 'outgoing',
+        // Agent is the top-level sender; the customer is on the
+        // conversation's meta sender for an outgoing message.
+        sender: { name: 'Minha Loja', phone_number: '+5588993752128' },
+        conversation: {
+          display_id: 88,
+          inbox_id: 12,
+          meta: { sender: { phone_number: '+5511912345678', name: 'Ana' } },
+        },
+      })
+    )
+    expect(normalized).not.toBeNull()
+    expect(normalized!.senderType).toBe('agent')
+    expect(normalized!.senderPhone).toBe('5511912345678')
+    expect(normalized!.conversationDisplayId).toBe(88)
   })
 
-  it('returns null for template notices (numeric outgoing variant too)', () => {
+  it('returns null for template notices (no thread text to persist)', () => {
     expect(
       normalizeIncomingMessage(messageCreated({ message_type: 'template' }))
     ).toBeNull()
-    expect(normalizeIncomingMessage(messageCreated({ message_type: 1 }))).toBeNull()
+  })
+
+  it('treats numeric outgoing (1) as an agent message, not a template', () => {
+    const normalized = normalizeIncomingMessage(
+      messageCreated({ message_type: 1 })
+    )
+    expect(normalized).not.toBeNull()
+    expect(normalized!.senderType).toBe('agent')
   })
 
   it('returns null when the sender phone cannot be resolved', () => {

@@ -113,6 +113,14 @@ export interface NormalizedInbound {
   senderName: string;
   conversationDisplayId: number;
   inboxId: number;
+  /**
+   * Who authored the message. `customer` for messages that reached the
+   * paired number from the outside; `agent` for messages sent by the
+   * agent from the connected WhatsApp app (the gateway echoes these
+   * back, and we persist them so manual phone replies stay visible in
+   * the CRM thread).
+   */
+  senderType: 'customer' | 'agent';
   contentType: 'text' | 'image' | 'video' | 'audio' | 'document';
   contentText: string | null;
   attachmentUrl: string | null;
@@ -129,11 +137,18 @@ function digitsOnly(value: string): string {
  * Preference order mirrors how Chatwoot populates senders:
  *   1. top-level sender.phone_number
  *   2. nested conversation.meta.sender.phone_number
+ *
+ * For `outgoing` messages the top-level sender is the *agent* (the
+ * paired number), so the customer is instead the conversation's meta
+ * sender — pass `outgoing: true` to flip the preference.
  */
-export function extractSenderPhone(payload: ChatwootWebhookPayload): string | null {
-  const direct = payload.sender?.phone_number;
+export function extractSenderPhone(
+  payload: ChatwootWebhookPayload,
+  outgoing = false,
+): string | null {
+  const dir = payload.sender?.phone_number;
   const nested = payload.conversation?.meta?.sender?.phone_number;
-  const raw = direct || nested;
+  const raw = outgoing ? nested || dir : dir || nested;
   if (!raw) return null;
   const digits = digitsOnly(raw);
   return digits.length >= 8 ? digits : null;
@@ -149,9 +164,14 @@ const ATTACHMENT_KIND_MAP: Record<string, NormalizedInbound['contentType']> = {
 };
 
 /**
- * Normalize an incoming message_created payload into the shape the
+ * Normalize a message_created payload into the shape the
  * persistence pipeline expects. Returns null when the payload isn't a
- * persistable inbound message (wrong type, no sender phone, echo).
+ * persistable message (no id, no sender phone, template notices, echo
+ * of a CRM-sent reply that is already persisted upstream).
+ *
+ * Both customer-authored and agent-authored (outgoing from the paired
+ * number) messages are retained; the caller decides whether to bump
+ * unread/reopen for agent messages and to dedupe its own sends.
  */
 export function normalizeIncomingMessage(
   payload: ChatwootWebhookPayload,
@@ -161,12 +181,14 @@ export function normalizeIncomingMessage(
     messageTypeRaw === 'outgoing' ||
     messageTypeRaw === 'template' ||
     messageTypeRaw === 1;
-  if (isOutgoing) return null;
+  // Template notices carry no per-message thread text we can attribute
+  // to a customer or agent — nothing to persist.
+  if (isOutgoing && messageTypeRaw === 'template') return null;
 
   const messageId = Number(payload.id);
   if (!messageId) return null;
 
-  const senderPhone = extractSenderPhone(payload);
+  const senderPhone = extractSenderPhone(payload, isOutgoing);
   if (!senderPhone) return null;
 
   const displayId = Number(
@@ -218,6 +240,7 @@ export function normalizeIncomingMessage(
     senderName,
     conversationDisplayId: displayId,
     inboxId,
+    senderType: isOutgoing ? 'agent' : 'customer',
     contentType,
     contentText,
     attachmentUrl,

@@ -208,4 +208,38 @@ describe('POST /api/chatwoot/webhook/[connectionId]', () => {
     await afterCallbacks[0]()
     expect(state.messageInserts).toHaveLength(0)
   })
+
+  it('persists an outgoing agent message as sender_type=agent without bumping unread', async () => {
+    const res = await POST(
+      signedRequest(
+        payloadBody({
+          message_type: 'outgoing',
+          content: 'resposta do celular',
+          sender: { name: 'Minha Loja', phone_number: '+5588993752128' },
+          conversation: {
+            display_id: 88,
+            inbox_id: 12,
+            meta: { sender: { phone_number: '+5511912345678', name: 'Ana' } },
+          },
+        })
+      ),
+      { params: Promise.resolve({ connectionId: CONNECTION.id }) }
+    )
+    expect(res.status).toBe(200)
+    await afterCallbacks[0]()
+
+    expect(state.messageInserts).toHaveLength(1)
+    expect(state.messageInserts[0]).toMatchObject({
+      sender_type: 'agent',
+      content_text: 'resposta do celular',
+      message_id: '501',
+      channel: 'chatwoot',
+    })
+    // The preview updates but unread stays flat (agent activity).
+    const preview = state.conversationUpdates.find((u) => 'last_message_text' in (u as Record<string, unknown>))
+    expect(preview).toMatchObject({
+      last_message_text: 'resposta do celular',
+      unread_count: 0,
+    })
+  })
 })

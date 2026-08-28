@@ -283,12 +283,29 @@ async function handleIncomingMessage(
     mediaUrl = await storeInboundAttachment(accountId, normalized)
   }
 
-  // ---- Persist the customer's message.
+  // ---- Dedupe agent-authored sends. An outgoing echo that is OUR OWN
+  // ---- CRM reply (message_id already persisted by sendMessageViaChatwoot)
+  // ---- must not create a ghost copy — a manual phone send has a fresh
+  // ---- Chatwoot message id, so it falls through and gets persisted.
+  if (normalized.senderType === 'agent') {
+    const { data: existing } = await supabaseAdmin()
+      .from('messages')
+      .select('id')
+      .eq('message_id', String(normalized.messageId))
+      .eq('channel', 'chatwoot')
+      .maybeSingle()
+    if (existing) {
+      console.log(`${LOG} agent echo already persisted (msgId=${normalized.messageId}) — skipping`)
+      return
+    }
+  }
+
+  // ---- Persist the message (customer or agent authored).
   const { error: msgError } = await supabaseAdmin()
     .from('messages')
     .insert({
       conversation_id: conversation.id,
-      sender_type: 'customer',
+      sender_type: normalized.senderType,
       content_type: normalized.contentType,
       content_text: normalized.contentText,
       media_url: mediaUrl,
@@ -303,16 +320,21 @@ async function handleIncomingMessage(
     return
   }
 
-  console.log(`${LOG} message INSERTED successfully: id=${normalized.messageId} conv_id=${conversation.id}`)
+  console.log(`${LOG} message INSERTED successfully: id=${normalized.messageId} conv_id=${conversation.id} sender_type=${normalized.senderType}`)
 
-  // Preview + unread badge, mirroring the Meta pipeline.
+  // Preview + unread badge, mirroring the Meta pipeline. Agent sends
+  // update the preview but never bump the unread badge (that's for
+  // customer activity).
   const { error: convError } = await supabaseAdmin()
     .from('conversations')
     .update({
       last_message_text:
         normalized.contentText || `[${normalized.contentType}]`,
       last_message_at: new Date().toISOString(),
-      unread_count: (conversation.unread_count || 0) + 1,
+      unread_count:
+        normalized.senderType === 'customer'
+          ? (conversation.unread_count || 0) + 1
+          : conversation.unread_count || 0,
       updated_at: new Date().toISOString(),
     })
     .eq('id', conversation.id)
@@ -321,18 +343,22 @@ async function handleIncomingMessage(
     console.error('[chatwoot-webhook] error updating conversation:', convError)
   }
 
-  // Customer writing again re-opens the thread (issue #409 parity).
-  await reopenClosedConversation(supabaseAdmin(), conversation)
+  // Customer writing again re-opens the thread (issue #409 parity). An
+  // agent send doesn't reopen a closed conversation.
+  if (normalized.senderType === 'customer') {
+    await reopenClosedConversation(supabaseAdmin(), conversation)
+  }
 
-  // Public-API fan-out. (Flows/automations/AI intentionally not wired
-  // for this channel yet — see the file header.)
-  await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
-    conversation_id: conversation.id,
-    contact_id: contactRecord.id,
-    whatsapp_message_id: String(normalized.messageId),
-    content_type: normalized.contentType,
-    text: normalized.contentText,
-  })
+  // Public-API fan-out for inbound customer activity only.
+  if (normalized.senderType === 'customer') {
+    await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
+      conversation_id: conversation.id,
+      contact_id: contactRecord.id,
+      whatsapp_message_id: String(normalized.messageId),
+      content_type: normalized.contentType,
+      text: normalized.contentText,
+    })
+  }
 }
 
 /**
