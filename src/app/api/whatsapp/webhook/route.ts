@@ -13,6 +13,7 @@ import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
+import { ensureNewLeadDeal } from '@/lib/deals/auto-create'
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -606,6 +607,18 @@ async function processMessage(
     await dispatchWebhookEvent(supabaseAdmin(), accountId, 'conversation.created', {
       conversation_id: conversation.id,
       contact_id: contactRecord.id,
+    })
+  }
+
+  // Automatic "New Lead" deal for a brand-new inbound contact (parity
+  // with the Chatwoot gateway), so the contact shows up on the pipeline
+  // board immediately. Only for customer-authored first messages.
+  if (contactOutcome.wasCreated) {
+    await ensureNewLeadDeal(supabaseAdmin(), {
+      accountId,
+      ownerUserId: configOwnerUserId,
+      contact: contactRecord,
+      conversation,
     })
   }
 

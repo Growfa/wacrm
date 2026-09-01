@@ -232,27 +232,51 @@ export async function fetchAttachmentBytes(
   rawUrl: string,
   maxBytes = 16 * 1024 * 1024,
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
-  if (!(await isDeliverableUrl(rawUrl))) {
-    throw new ChatwootApiError('Media URL is not reachable', 400);
+  // Chatwoot/Active Storage serve attachments via a `/blobs/redirect/`
+  // signed URL that 302-bounces to the underlying disk URL, and our own
+  // Supabase Storage links don't redirect. We must follow redirects for
+  // media to download, but doing so naively is an SSRF hole: a public
+  // URL could 3xx-bounce to a loopback/private address. So we walk the
+  // chain ourselves, re-validating every hop with the same `isDeliverableUrl`
+  // guard before following it, and cap the number of hops.
+  const MAX_HOPS = 5;
+  let url = rawUrl;
+  for (let hop = 0; ; hop++) {
+    if (!(await isDeliverableUrl(url))) {
+      throw new ChatwootApiError('Media URL is not reachable', 400);
+    }
+    const response = await fetch(url, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) {
+        throw new ChatwootApiError('Redirect without a Location header', 400);
+      }
+      if (hop >= MAX_HOPS) {
+        throw new ChatwootApiError('Too many redirects downloading media', 400);
+      }
+      url = new URL(location, url).toString();
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new ChatwootApiError(
+        `Failed to download media (${response.status})`,
+        400,
+      );
+    }
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      throw new ChatwootApiError('Media exceeds the 16 MB limit', 400);
+    }
+    return {
+      bytes: new Uint8Array(buffer),
+      contentType: response.headers.get('content-type') || 'application/octet-stream',
+    };
   }
-  const response = await fetch(rawUrl, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) {
-    throw new ChatwootApiError(
-      `Failed to download media (${response.status})`,
-      400,
-    );
-  }
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > maxBytes) {
-    throw new ChatwootApiError('Media exceeds the 16 MB limit', 400);
-  }
-  return {
-    bytes: new Uint8Array(buffer),
-    contentType: response.headers.get('content-type') || 'application/octet-stream',
-  };
 }
 
 // ------------------------------------------------------------

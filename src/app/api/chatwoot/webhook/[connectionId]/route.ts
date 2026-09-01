@@ -44,6 +44,7 @@ import {
 } from '@/lib/channels/inbound-identity'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
+import { ensureNewLeadDeal } from '@/lib/deals/auto-create'
 
 const LOG = '[chatwoot-webhook]'
 
@@ -273,6 +274,18 @@ async function handleIncomingMessage(
     await dispatchWebhookEvent(supabaseAdmin(), accountId, 'conversation.created', {
       conversation_id: conversation.id,
       contact_id: contactRecord.id,
+    })
+  }
+
+  // Automatic "New Lead" deal for a brand-new inbound contact, so the
+  // contact immediately shows up on the pipeline board. Only for
+  // customer-authored first messages (never agent echoes).
+  if (normalized.senderType === 'customer' && contactOutcome.wasCreated) {
+    await ensureNewLeadDeal(supabaseAdmin(), {
+      accountId,
+      ownerUserId,
+      contact: contactRecord,
+      conversation,
     })
   }
 
