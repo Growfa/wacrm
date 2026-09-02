@@ -17,6 +17,19 @@ import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+// New activity (a fresh message, or a conversation UPDATE that bumped
+// `last_message_at`) should push that conversation to the top of the
+// list — WhatsApp-style. The initial load sorts by `last_message_at`
+// desc, but live realtime events only *patch* an existing row; without
+// re-sorting, an active thread would sit stale mid-list. Non-mutating:
+// returns a fresh array with the targeted conversation first.
+function moveToFront<T extends { id: string }>(list: T[], id: string): T[] {
+  const rest = list.filter((c) => c.id !== id);
+  if (rest.length === list.length) return list;
+  const conv = list.find((c) => c.id === id)!;
+  return [conv, ...rest];
+}
+
 // Remembers the agent's show/hide choice for the desktop contact panel
 // across reloads and sessions (device-scoped, like the theme prefs).
 const CONTACT_PANEL_STORAGE_KEY = "wacrm:inbox:contact-panel-open";
@@ -250,8 +263,8 @@ function InboxPageInner() {
         // knownConvIdsRef for why a closure flag inside the updater would
         // always read false here.
         if (knownConvIdsRef.current.has(newMsg.conversation_id)) {
-          setConversations((prev) =>
-            prev.map((c) =>
+          setConversations((prev) => {
+            const patched = prev.map((c) =>
               c.id === newMsg.conversation_id
                 ? {
                     ...c,
@@ -263,8 +276,11 @@ function InboxPageInner() {
                         : c.unread_count + 1,
                   }
                 : c,
-            ),
-          );
+            );
+            // WhatsApp-style: any message arrival bumps the conv to the
+            // top of the list so new activity is always immediately visible.
+            return moveToFront(patched, newMsg.conversation_id);
+          });
         } else {
           // First time we're seeing this conv: the conv-INSERT event
           // hasn't landed yet, or was missed. Hydrate from the DB so
@@ -317,8 +333,9 @@ function InboxPageInner() {
           // back on for the ~100ms it takes for the reset effect's server
           // UPDATE to round-trip. Non-active convs take the value as-is.
           const isActive = activeConversation?.id === conv.id;
-          setConversations((prev) =>
-            prev.map((c) =>
+          setConversations((prev) => {
+            const current = prev.find((c) => c.id === conv.id);
+            const patched = prev.map((c) =>
               c.id === conv.id
                 ? {
                     ...c,
@@ -326,8 +343,15 @@ function InboxPageInner() {
                     unread_count: isActive ? 0 : conv.unread_count,
                   }
                 : c,
-            ),
-          );
+            );
+            // WhatsApp-style: move to top when a real new message arrived
+            // (last_message_at strictly increased). Non-message updates
+            // (status change, reassignment) leave the position unchanged.
+            const movedByMessage =
+              !!conv.last_message_at &&
+              (!current?.last_message_at || conv.last_message_at > current.last_message_at);
+            return movedByMessage ? moveToFront(patched, conv.id) : patched;
+          });
         } else {
           // UPDATE arrived before the INSERT (or after a missed INSERT)
           // — fetch the row so it surfaces with its contact joined. The
