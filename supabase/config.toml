@@ -1,0 +1,6 @@
+# Supabase project configuration. Minimal: enough for
+# `supabase functions deploy storage-gc` (project_id + function block).
+project_id = "iisrrjxxmiyuwuedyoko"
+
+[functions.storage-gc]
+verify_jwt = false
