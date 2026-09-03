@@ -17,11 +17,15 @@
 -- Idempotent and safe to re-run.
 --
 -- HOW TO APPLY (Supabase Dashboard > SQL Editor):
---   1) create extension if not exists pg_cron;   -- usually pre-enabled
---   2) create extension if not exists pg_net;    -- usually pre-enabled
---   3) Replace <YOUR_SERVICE_ROLE_KEY> below with your real key,
---      then run the whole file.
+--   1) Replace <YOUR_SERVICE_ROLE_KEY> below with your real key.
+--   2) Run the whole file. It enables pg_cron + pg_net first if
+--      they are not already on.
 -- ============================================================
+
+-- 0) Enable the scheduler extensions (idempotent; required before the
+--    `cron` and `net` schemas exist).
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
 
 -- 1) Unschedule any previous version of the job (idempotent).
 select cron.unschedule('storage-gc-nightly')
